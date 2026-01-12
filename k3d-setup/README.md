@@ -54,8 +54,14 @@ $ ./practice_06_k8s_intro.sh -d
 $ ./practice_06_k8s_intro.sh -c
 ```
 
+### Config
+
 `k3d` automatically modifies the default cluster context, thus the `kubectl` command can be used
 right after cluster creation without a fuzz.
+This can be validated with the following command:
+```bash
+$ kubectl cluster-info
+```
 
 ## Good to know
 
@@ -64,6 +70,7 @@ To check the available `k3d` cluster configs or select another context config, s
 or consult with `kubectl config --help`.
 
 - Custom-built docker images must be imported into the cluster using the `k3d image import` command.
+ Usually, these steps are implicitly taken care by practice setup scritps!
 
 - By default, `k3d` also initiates a load balancer as a separate container alongside the cluster
 node containers for easier access to exposed services. Requests directed to the load balancer
@@ -73,20 +80,20 @@ cluster creation with `-p 80:80@loadbalancer`), an "external service" can be acc
 `http://localhost:80`.
 
 - Configurations based on public domain names can be tested by using localhost domain names using
-`*.localhost`. For exemple, to access to an ingress service via the load balancer, a URL similar to 
-`http://my-svc.my-own-domain.localhost:80` can be used.
+`*.localhost`. For example, to access to an ingress-exposed service via the load balancer, a URL
+similar to `http://my-own-svc.my-own-subdomain.localhost:80` can be used.
 
 - Ports exposed on nodes (e.g., `NodePort`) can be accessed via the load balancer or directly
 on the "cluster node" containers provided it is set for `k3d` during cluster creation
 (e.g.,`-p 30003:30003@loadbalancer` or `-p 30003:30003@server:0:direct`).
-Check the related documentation [here](https://k3d.io/v5.3.0/usage/exposing_services/).
+Check the related documentation [here](https://k3d.io/v5.8.3/usage/exposing_services/).
 
 - Latest version _v5.8.3_ of `k3d` does not support _K8s Gateway API_ by default.
 For an option to configure the _Gateway API_ with latest `traefik` version manually, check
 [this description](https://doc.traefik.io/traefik/getting-started/kubernetes/).
 Nevertheless, _Ingress_ routes work just fine.
 
-## Practices
+## Differences in practices
 
 ### Practice 06 (K8s intro)
 
