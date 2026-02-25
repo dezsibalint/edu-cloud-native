@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pdf-to-image
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pdf-to-image
+  template:
+    metadata:
+      labels:
+        app: pdf-to-image
+    spec:
+      containers:
+      - name: pdf-to-image
+        image: pdf-to-image:latest
+        imagePullPolicy: IfNotPresent
+        envFrom:
+        - configMapRef:
+            name: ocr-services-config
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "300m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
