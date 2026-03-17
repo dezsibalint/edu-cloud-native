@@ -24,6 +24,9 @@ def get_namespace():
 def pod_names():
     """Return pod names of the deployment."""
     # TODO
+    #
+    # The implementation (here and elsewhere) should not make any
+    # assumptions on the number of pods in the system.
     return names
 
 def remote_addr(pod_name):
@@ -51,6 +54,10 @@ def save_db(db):
 
 # -------------------------------------------------------------------------
 # Do not modify anything below this line
+#
+# It is tempting to change the arguments of app.run() below.  Do not
+# that.  Instead write a pod specification that passes the correct
+# command line arguments to this program.
 
 # These functions are based on the code of
 # https://en.wikipedia.org/wiki/Rendezvous_hashing
