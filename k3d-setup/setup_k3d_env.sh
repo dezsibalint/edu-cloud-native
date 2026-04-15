@@ -161,7 +161,7 @@ fi
 install_deps
 
 ### Docker
-DOCKER_PRE_INSTALLED=$(command -pv docker)
+DOCKER_PRE_INSTALLED="$(command -pv docker)"
 if ! command -v docker >/dev/null 2>&1 || [ "${UPDATE}" = true ]; then
     # Binary
 	install_docker
