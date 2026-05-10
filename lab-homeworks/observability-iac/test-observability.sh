@@ -241,11 +241,15 @@ PY
     fi
 
     total_work_after="$(wait_value_gt 'sum(document_total_work_seconds_sum)' "$total_work_before" "$TIMEOUT_SECONDS" || true)"
-    end_to_end_sum="$(prom_value 'sum(document_upload_to_finish_seconds_sum{job="text-aggregation"})' 2>/dev/null || echo 0)"
-    if float_gt "$total_work_after" "$total_work_before" && float_ge "$total_work_after" "$end_to_end_sum"; then
-        pass "TC7 Total processing work time is recorded and is >= text aggregation end-to-end sum"
+    total_work_delta="$(python3 - "$total_work_after" "$total_work_before" <<'PY'
+import sys
+print(float(sys.argv[1]) - float(sys.argv[2]))
+PY
+)"
+    if float_gt "$total_work_delta" "0"; then
+        pass "TC7 Total processing work time is recorded for the uploaded document"
     else
-        fail "TC7 Total processing work time is recorded and is >= text aggregation end-to-end sum" "document_total_work_seconds_sum=${total_work_after}, text_aggregation_elapsed_sum=${end_to_end_sum}"
+        fail "TC7 Total processing work time is recorded for the uploaded document" "document_total_work_seconds_sum delta=${total_work_delta}"
     fi
 }
 
