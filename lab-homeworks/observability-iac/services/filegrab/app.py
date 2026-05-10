@@ -13,7 +13,7 @@ from pathlib import Path
 from flask import Flask, request, jsonify
 import redis
 from minio import Minio
-from prometheus_client import Histogram, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 SERVICE_NAME = "filegrab"
 
@@ -30,6 +30,18 @@ SUPPORTED_FORMATS = {'.pdf', '.png', '.jpg', '.jpeg'}
 COMPONENT_EXECUTION_SECONDS = Histogram(
     'component_execution_seconds',
     'Time spent processing a single component request'
+)
+UPLOAD_REQUESTS_TOTAL = Counter(
+    'upload_requests_total',
+    'Total number of upload requests received'
+)
+UPLOAD_FAILURES_TOTAL = Counter(
+    'upload_failures_total',
+    'Total number of failed upload requests'
+)
+UPLOAD_SUCCESS_TOTAL = Counter(
+    'upload_success_total',
+    'Total number of successful upload requests'
 )
 
 app = Flask(__name__)
@@ -70,19 +82,23 @@ def upload_file():
     """
     start_t = time.perf_counter()
     upload_ts = time.time()
+    UPLOAD_REQUESTS_TOTAL.inc()
     try:
         # Validate file presence
         if 'file' not in request.files:
+            UPLOAD_FAILURES_TOTAL.inc()
             return jsonify({"error": "No file provided"}), 400
         
         file = request.files['file']
         
         if not file.filename:
+            UPLOAD_FAILURES_TOTAL.inc()
             return jsonify({"error": "Empty filename"}), 400
         
         # Validate file type
         file_ext = Path(file.filename).suffix.lower()
         if file_ext not in SUPPORTED_FORMATS:
+            UPLOAD_FAILURES_TOTAL.inc()
             return jsonify({"error": f"Unsupported file type. Use: {', '.join(SUPPORTED_FORMATS)}"}), 400
         
         # Generate unique job ID
@@ -110,6 +126,8 @@ def upload_file():
                 'work_seconds': 0.0,
             },
         )
+        redis_client.set(f"job:{job_id}:start_ts", upload_ts)
+        redis_client.set(f"job:{job_id}:processing_sum", 0.0)
         
         # Queue job for PDF-to-Image service
         job_message = {
@@ -121,6 +139,7 @@ def upload_file():
         redis_client.lpush('pdf_to_image_queue', json.dumps(job_message))
         
         print(f"Job {job_id}: Queued for processing")
+        UPLOAD_SUCCESS_TOTAL.inc()
         
         return jsonify({
             "status": "success",
@@ -129,6 +148,7 @@ def upload_file():
         }), 202
     except Exception as e:
         print(f"Upload failed: {e}")
+        UPLOAD_FAILURES_TOTAL.inc()
         return jsonify({"error": "Upload failed"}), 500
     finally:
         COMPONENT_EXECUTION_SECONDS.observe(time.perf_counter() - start_t)

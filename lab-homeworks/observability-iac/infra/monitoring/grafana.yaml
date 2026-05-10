@@ -132,6 +132,58 @@ data:
               "legendFormat": "{{job}}"
             }
           ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Pod CPU usage",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+          "targets": [
+            {
+              "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"default\", container!=\"\", pod=~\"filegrab.*|pdf-to-image.*|preprocessing.*|ocr.*|text-aggregation.*\"}[5m])) by (pod)",
+              "legendFormat": "{{pod}}"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Pod memory usage",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+          "targets": [
+            {
+              "expr": "sum(container_memory_working_set_bytes{namespace=\"default\", container!=\"\", pod=~\"filegrab.*|pdf-to-image.*|preprocessing.*|ocr.*|text-aggregation.*\"}) by (pod)",
+              "legendFormat": "{{pod}}"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Upload requests and failures",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+          "targets": [
+            {
+              "expr": "sum(rate(upload_requests_total[5m])) by (job)",
+              "legendFormat": "requests {{job}}"
+            },
+            {
+              "expr": "sum(rate(upload_failures_total[5m])) by (job)",
+              "legendFormat": "failures {{job}}"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Component successes and failures",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+          "targets": [
+            {
+              "expr": "sum(rate(component_success_total[5m])) by (job)",
+              "legendFormat": "success {{job}}"
+            },
+            {
+              "expr": "sum(rate(component_failures_total[5m])) by (job)",
+              "legendFormat": "failure {{job}}"
+            }
+          ]
         }
       ]
     }

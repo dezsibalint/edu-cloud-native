@@ -12,7 +12,7 @@ import redis
 from collections import defaultdict
 from kafka import KafkaConsumer
 from minio import Minio
-from prometheus_client import Histogram, start_http_server
+from prometheus_client import Counter, Histogram, start_http_server
 
 SERVICE_NAME = "text_aggregation"
 
@@ -44,6 +44,14 @@ redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=Tr
 COMPONENT_EXECUTION_SECONDS = Histogram(
     'component_execution_seconds',
     'Time spent processing a single component request'
+)
+COMPONENT_SUCCESS_TOTAL = Counter(
+    'component_success_total',
+    'Total number of successfully completed processing tasks'
+)
+COMPONENT_FAILURES_TOTAL = Counter(
+    'component_failures_total',
+    'Total number of failed processing tasks'
 )
 DOCUMENT_UPLOAD_TO_FINISH_SECONDS = Histogram(
     'document_upload_to_finish_seconds',
@@ -90,7 +98,13 @@ def process_message(message):
     page_num = data['page_number']
     total = data['total_pages']
     text = data['text']
-    upload_ts = float(data.get('upload_ts') or redis_client.hget(f"job:{job_id}", 'upload_ts') or time.time())
+    upload_ts = float(
+        data.get('upload_ts')
+        or redis_client.get(f"job:{job_id}:start_ts")
+        or redis_client.hget(f"job:{job_id}", 'upload_ts')
+        or time.time()
+    )
+    completed_total_pages = None
     
     print(f"Job {job_id}: Received page {page_num}/{total}")
     
@@ -109,15 +123,27 @@ def process_message(message):
                 f"=== PAGE {num} ===\n{text}" for num, text in sorted_pages
             )
 
-            total_work_seconds = float(redis_client.hget(f"job:{job_id}", 'work_seconds') or 0.0)
-            DOCUMENT_PAGE_COUNT.observe(total)
-            DOCUMENT_TOTAL_WORK_SECONDS.observe(total_work_seconds)
-            DOCUMENT_UPLOAD_TO_FINISH_SECONDS.observe(time.time() - upload_ts)
-            
             save_to_minio(job_id, full_text)
+            completed_total_pages = total
             print(f"Job {job_id}: Complete!")
+
+        processing_duration = time.perf_counter() - start_t
+        redis_client.incrbyfloat(f"job:{job_id}:processing_sum", processing_duration)
+        redis_client.hincrbyfloat(f"job:{job_id}", 'work_seconds', processing_duration)
+        COMPONENT_SUCCESS_TOTAL.inc()
+        DOCUMENT_UPLOAD_TO_FINISH_SECONDS.observe(time.time() - upload_ts)
+
+        if completed_total_pages is not None:
+            total_work_seconds = float(
+                redis_client.get(f"job:{job_id}:processing_sum")
+                or redis_client.hget(f"job:{job_id}", 'work_seconds')
+                or 0.0
+            )
+            DOCUMENT_PAGE_COUNT.observe(completed_total_pages)
+            DOCUMENT_TOTAL_WORK_SECONDS.observe(total_work_seconds)
     except Exception as e:
         print(f"Failed to process message: {e}")
+        COMPONENT_FAILURES_TOTAL.inc()
         raise
     finally:
         COMPONENT_EXECUTION_SECONDS.observe(time.perf_counter() - start_t)

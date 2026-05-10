@@ -13,7 +13,7 @@ import numpy as np
 import redis
 import fitz
 from minio import Minio
-from prometheus_client import Histogram, start_http_server
+from prometheus_client import Counter, Histogram, start_http_server
 
 SERVICE_NAME = "pdf_to_image"
 
@@ -34,6 +34,18 @@ METRICS_PORT = int(os.environ.get('METRICS_PORT', '8000'))
 COMPONENT_EXECUTION_SECONDS = Histogram(
     'component_execution_seconds',
     'Time spent processing a single component request'
+)
+PROCESSED_JOBS_TOTAL = Counter(
+    'processed_jobs_total',
+    'Total number of jobs processed by the component'
+)
+COMPONENT_SUCCESS_TOTAL = Counter(
+    'component_success_total',
+    'Total number of successfully completed processing tasks'
+)
+COMPONENT_FAILURES_TOTAL = Counter(
+    'component_failures_total',
+    'Total number of failed processing tasks'
 )
 DOCUMENT_UPLOAD_TO_FINISH_SECONDS = Histogram(
     'document_upload_to_finish_seconds',
@@ -141,7 +153,12 @@ def process_job(job_data):
     job_id = job_data['job_id']
     file_path = job_data['file_path']
     file_type = job_data['file_type']
-    upload_ts = float(job_data.get('upload_ts') or redis_client.hget(f"job:{job_id}", 'upload_ts') or time.time())
+    upload_ts = float(
+        job_data.get('upload_ts')
+        or redis_client.get(f"job:{job_id}:start_ts")
+        or redis_client.hget(f"job:{job_id}", 'upload_ts')
+        or time.time()
+    )
     
     print(f"Job {job_id}: Started processing")
     start_t = time.perf_counter()
@@ -161,7 +178,6 @@ def process_job(job_data):
         total_pages = len(pages)
         DOCUMENT_PAGE_COUNT.observe(total_pages)
         redis_client.hset(f"job:{job_id}", mapping={'total_pages': total_pages})
-        redis_client.hincrbyfloat(f"job:{job_id}", 'work_seconds', sum(page[3] for page in pages))
         
         # Upload each page and publish to stream
         for image, page_num, total, page_duration in pages:
@@ -170,10 +186,15 @@ def process_job(job_data):
             print(f"Job {job_id}: Published page {page_num}/{total}")
         
         print(f"Job {job_id}: Completed ({len(pages)} page(s))")
+        PROCESSED_JOBS_TOTAL.inc()
+        COMPONENT_SUCCESS_TOTAL.inc()
     except Exception as e:
         print(f"Job {job_id}: Processing failed - {e}")
+        COMPONENT_FAILURES_TOTAL.inc()
     finally:
         duration = time.perf_counter() - start_t
+        redis_client.incrbyfloat(f"job:{job_id}:processing_sum", duration)
+        redis_client.hincrbyfloat(f"job:{job_id}", 'work_seconds', duration)
         COMPONENT_EXECUTION_SECONDS.observe(duration)
         DOCUMENT_UPLOAD_TO_FINISH_SECONDS.observe(time.time() - upload_ts)
 
