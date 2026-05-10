@@ -40,6 +40,13 @@ echo "[6/6] Deleting ConfigMap..."
 kubectl delete -f infra/configmap.yaml --ignore-not-found=true
 sleep 10
 
+echo "[7/7] Deleting Monitoring Stack..."
+kubectl delete -f infra/monitoring/grafana.yaml --ignore-not-found=true
+kubectl delete -f infra/monitoring/node-exporter.yaml --ignore-not-found=true
+kubectl delete -f infra/monitoring/prometheus.yaml --ignore-not-found=true
+kubectl delete -f infra/monitoring/namespace.yaml --ignore-not-found=true
+sleep 10
+
 echo "Kubernetes cleanup complete"
 
 # ===========================================

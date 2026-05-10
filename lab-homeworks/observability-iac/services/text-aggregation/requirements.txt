@@ -1,3 +1,4 @@
 kafka-python==2.3.0
 minio==7.2.20
 redis==7.1.0
+prometheus-client==0.21.1

@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 import pika
 from minio import Minio
+from prometheus_client import Histogram, start_http_server
 
 SERVICE_NAME = "preprocessing"
 
@@ -31,9 +32,19 @@ RABBITMQ_PASSWORD = os.environ['RABBITMQ_PASSWORD']
 PREPROCESSING_STREAM = 'preprocessing_stream'
 CONSUMER_GROUP = 'preprocessors'
 OCR_QUEUE = 'ocr_queue'
+METRICS_PORT = int(os.environ.get('METRICS_PORT', '8000'))
+
+COMPONENT_EXECUTION_SECONDS = Histogram(
+    'component_execution_seconds',
+    'Time spent processing a single component request'
+)
+DOCUMENT_UPLOAD_TO_FINISH_SECONDS = Histogram(
+    'document_upload_to_finish_seconds',
+    'Time elapsed from file upload until the component finished processing'
+)
 
 # Initialize clients
-redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
+redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 minio_client = Minio(
     MINIO_HOST,
     access_key=MINIO_ACCESS_KEY,
@@ -63,7 +74,7 @@ def preprocess_image(image):
     return binary
 
 
-def publish_to_rabbitmq(job_id, page_num, total, preprocessed_path):
+def publish_to_rabbitmq(job_id, page_num, total, preprocessed_path, upload_ts):
     """
     Publish to RabbitMQ using persistent channel.
     """
@@ -73,7 +84,8 @@ def publish_to_rabbitmq(job_id, page_num, total, preprocessed_path):
         'job_id': job_id,
         'page_number': page_num,
         'total_pages': total,
-        'image_path': preprocessed_path
+        'image_path': preprocessed_path,
+        'upload_ts': upload_ts,
     }
     
     rabbitmq_channel.basic_publish(
@@ -88,10 +100,11 @@ def publish_to_rabbitmq(job_id, page_num, total, preprocessed_path):
 
 def process_message(message_id, message_data):
     """Process a single Redis Stream message."""
-    job_id = message_data[b'job_id'].decode('utf-8')
-    page_num = int(message_data[b'page_number'].decode('utf-8'))
-    total = int(message_data[b'total_pages'].decode('utf-8'))
-    image_path = message_data[b'image_path'].decode('utf-8')
+    job_id = message_data['job_id']
+    page_num = int(message_data['page_number'])
+    total = int(message_data['total_pages'])
+    image_path = message_data['image_path']
+    upload_ts = float(message_data.get('upload_ts') or redis_client.hget(f"job:{job_id}", 'upload_ts') or time.time())
     
     print(f"Job {job_id}: Processing page {page_num}/{total}")
     start_t = time.perf_counter()
@@ -127,13 +140,18 @@ def process_message(message_id, message_data):
         print(f"Job {job_id}: Saved preprocessed page {page_num}")
         
         # Publish to RabbitMQ
-        publish_to_rabbitmq(job_id, page_num, total, preprocessed_path)
+        publish_to_rabbitmq(job_id, page_num, total, preprocessed_path, upload_ts)
         
         # ACK Redis message
+        redis_client.hincrbyfloat(f"job:{job_id}", 'work_seconds', time.perf_counter() - start_t)
         redis_client.xack(PREPROCESSING_STREAM, CONSUMER_GROUP, message_id)
         print(f"Job {job_id}: Page {page_num}/{total} complete")
     except Exception as e:
         print(f"Job {job_id}: Page {page_num} failed - {e}")
+    finally:
+        duration = time.perf_counter() - start_t
+        COMPONENT_EXECUTION_SECONDS.observe(duration)
+        DOCUMENT_UPLOAD_TO_FINISH_SECONDS.observe(time.time() - upload_ts)
 
 
 def consume_messages():
@@ -143,6 +161,7 @@ def consume_messages():
     print("Preprocessing service starting...")
     
     print(f"Connecting to RabbitMQ: {RABBITMQ_HOST}")
+    start_http_server(METRICS_PORT)
     rabbitmq_connection = pika.BlockingConnection(rabbitmq_params)
     rabbitmq_channel = rabbitmq_connection.channel()
     rabbitmq_channel.queue_declare(queue=OCR_QUEUE, durable=True)

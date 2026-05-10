@@ -35,6 +35,13 @@ echo "[6/6] Deploying MinIO..."
 kubectl apply -f infra/minio.yaml
 sleep 5
 
+echo "[7/7] Deploying Monitoring Stack..."
+kubectl apply -f infra/monitoring/namespace.yaml
+kubectl apply -f infra/monitoring/prometheus.yaml
+kubectl apply -f infra/monitoring/node-exporter.yaml
+kubectl apply -f infra/monitoring/grafana.yaml
+sleep 5
+
 echo "Infrastructure deployment complete"
 
 # ===========================================
@@ -112,6 +119,8 @@ echo "  FileGrab Upload:    http://<PUBLIC_IP>:30080/upload"
 echo "  MinIO API:          http://<PUBLIC_IP>:30002"
 echo "  MinIO Console:      http://<PUBLIC_IP>:30003"
 echo "  RabbitMQ Management: http://<PUBLIC_IP>:30672"
+echo "  Prometheus:         http://<PUBLIC_IP>:30900"
+echo "  Grafana:            http://<PUBLIC_IP>:30300"
 
 echo ""
 echo "Credentials:"

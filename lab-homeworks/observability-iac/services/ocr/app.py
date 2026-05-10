@@ -11,9 +11,11 @@ import time
 import cv2
 import numpy as np
 import pika
+import redis
 import pytesseract
 from kafka import KafkaProducer
 from minio import Minio
+from prometheus_client import Histogram, start_http_server
 
 SERVICE_NAME = "ocr"
 
@@ -27,8 +29,22 @@ RABBITMQ_USER = os.environ['RABBITMQ_USER']
 RABBITMQ_PASSWORD = os.environ['RABBITMQ_PASSWORD']
 KAFKA_BOOTSTRAP = os.environ['KAFKA_BOOTSTRAP_SERVERS']
 KAFKA_TOPIC = os.environ['KAFKA_TOPIC']
+REDIS_HOST = os.environ.get('REDIS_HOST', 'redis')
+REDIS_PORT = int(os.environ.get('REDIS_PORT', '6379'))
+METRICS_PORT = int(os.environ.get('METRICS_PORT', '8000'))
 
 OCR_QUEUE = 'ocr_queue'
+
+COMPONENT_EXECUTION_SECONDS = Histogram(
+    'component_execution_seconds',
+    'Time spent processing a single component request'
+)
+DOCUMENT_UPLOAD_TO_FINISH_SECONDS = Histogram(
+    'document_upload_to_finish_seconds',
+    'Time elapsed from file upload until the component finished processing'
+)
+
+redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 
 # Initialize clients
 minio_client = Minio(
@@ -61,6 +77,7 @@ def process_message(ch, method, _, body):
     page_num = data['page_number']
     total = data['total_pages']
     image_path = data['image_path']
+    upload_ts = float(data.get('upload_ts') or redis_client.hget(f"job:{job_id}", 'upload_ts') or time.time())
     
     print(f"Job {job_id}: Processing page {page_num}/{total}")
     
@@ -95,10 +112,12 @@ def process_message(ch, method, _, body):
             'job_id': job_id,
             'page_number': page_num,
             'total_pages': total,
-            'text': text
+            'text': text,
+            'upload_ts': upload_ts,
         }
         kafka_producer.send(KAFKA_TOPIC, message)
         kafka_producer.flush()
+        redis_client.hincrbyfloat(f"job:{job_id}", 'work_seconds', time.perf_counter() - start_t)
         
         print(f"Job {job_id}: Published page {page_num}/{total}")
         
@@ -107,6 +126,9 @@ def process_message(ch, method, _, body):
     except Exception as e:
         print(f"Job {job_id}: Page {page_num} failed - {e}")
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+    finally:
+        COMPONENT_EXECUTION_SECONDS.observe(time.perf_counter() - start_t)
+        DOCUMENT_UPLOAD_TO_FINISH_SECONDS.observe(time.time() - upload_ts)
 
 
 def main():
@@ -115,6 +137,7 @@ def main():
     print(f"MinIO: {MINIO_HOST}")
     print(f"RabbitMQ: {RABBITMQ_HOST}")
     print(f"Kafka: {KAFKA_BOOTSTRAP}")
+    start_http_server(METRICS_PORT)
     
     # Setup RabbitMQ connection
     credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASSWORD)

@@ -18,9 +18,15 @@ spec:
       - name: preprocessing
         image: preprocessing:latest
         imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: metrics
         envFrom:
         - configMapRef:
             name: ocr-services-config
+        env:
+        - name: METRICS_PORT
+          value: "8000"
         resources:
           requests:
             memory: "256Mi"

@@ -191,6 +191,30 @@ Kubernetes node.
 Use a visualization tool (e.g., [Grafana](https://grafana.com/docs/))
 to create a dashboard to show the collected metrics.
 
+This repository’s observability implementation should expose the
+application metrics from each service and scrape them with Prometheus
+together with node CPU and memory metrics from node-exporter. Grafana
+should show both the wall-clock upload-to-finish time and the summed
+document work time so parallel page processing is visible.
+
+Expected access points after deployment:
+
+- Prometheus: `http://<public-ip>:30900`
+- Grafana: `http://<public-ip>:30300`
+- FileGrab metrics: `http://<public-ip>:30080/metrics`
+
+Key metrics to verify:
+
+- `component_execution_seconds` for per-component processing latency.
+- `process_cpu_seconds_total` and `process_resident_memory_bytes` for
+  each service process.
+- `document_upload_to_finish_seconds` for the elapsed time from upload
+  to the end of each component.
+- `document_page_count` for page counts in `pdf-to-image` and
+  `text-aggregation`.
+- `document_total_work_seconds` for the total summed work across all
+  processed pages.
+
 ### 2.2 Infrastructure as Code
 
 Select an Infrastructure as Code (IaC) tool for deployment automation.

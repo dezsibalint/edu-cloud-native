@@ -12,6 +12,7 @@ import redis
 from collections import defaultdict
 from kafka import KafkaConsumer
 from minio import Minio
+from prometheus_client import Histogram, start_http_server
 
 SERVICE_NAME = "text_aggregation"
 
@@ -25,6 +26,7 @@ MINIO_SECRET_KEY = os.environ['MINIO_SECRET_KEY']
 MINIO_BUCKET = os.environ['MINIO_BUCKET']
 REDIS_HOST = os.environ.get('REDIS_HOST', 'redis')
 REDIS_PORT = int(os.environ.get('REDIS_PORT', '6379'))
+METRICS_PORT = int(os.environ.get('METRICS_PORT', '8000'))
 
 # In-memory storage for aggregating pages
 job_pages = defaultdict(dict)
@@ -38,6 +40,23 @@ minio_client = Minio(
     secure=False
 )
 redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+
+COMPONENT_EXECUTION_SECONDS = Histogram(
+    'component_execution_seconds',
+    'Time spent processing a single component request'
+)
+DOCUMENT_UPLOAD_TO_FINISH_SECONDS = Histogram(
+    'document_upload_to_finish_seconds',
+    'Time elapsed from file upload until the component finished processing'
+)
+DOCUMENT_PAGE_COUNT = Histogram(
+    'document_page_count',
+    'Number of pages processed for a document'
+)
+DOCUMENT_TOTAL_WORK_SECONDS = Histogram(
+    'document_total_work_seconds',
+    'Total processing work time accumulated for a document'
+)
 
 
 def save_to_minio(job_id, text):
@@ -64,15 +83,16 @@ def save_to_minio(job_id, text):
 
 def process_message(message):
     """Process a single Kafka message."""
+    start_t = time.perf_counter()
     data = message.value
     
     job_id = data['job_id']
     page_num = data['page_number']
     total = data['total_pages']
     text = data['text']
+    upload_ts = float(data.get('upload_ts') or redis_client.hget(f"job:{job_id}", 'upload_ts') or time.time())
     
     print(f"Job {job_id}: Received page {page_num}/{total}")
-    start_t = time.perf_counter()
     
     try:
         # Store page
@@ -88,21 +108,19 @@ def process_message(message):
             full_text = "\n\n".join(
                 f"=== PAGE {num} ===\n{text}" for num, text in sorted_pages
             )
+
+            total_work_seconds = float(redis_client.hget(f"job:{job_id}", 'work_seconds') or 0.0)
+            DOCUMENT_PAGE_COUNT.observe(total)
+            DOCUMENT_TOTAL_WORK_SECONDS.observe(total_work_seconds)
+            DOCUMENT_UPLOAD_TO_FINISH_SECONDS.observe(time.time() - upload_ts)
             
             save_to_minio(job_id, full_text)
             print(f"Job {job_id}: Complete!")
-            
-            # End-to-end metric from FileGrab start timestamp
-            try:
-                start_ts = float(redis_client.get(f"job:{job_id}:start_ts") or 0)
-                if start_ts > 0:
-                    total_duration = time.time() - start_ts
-                    TOTAL_LAST_DURATION.set(total_duration)
-            except Exception:
-                pass
     except Exception as e:
         print(f"Failed to process message: {e}")
         raise
+    finally:
+        COMPONENT_EXECUTION_SECONDS.observe(time.perf_counter() - start_t)
 
 
 def main():
@@ -111,6 +129,7 @@ def main():
     print(f"Kafka: {KAFKA_BOOTSTRAP}")
     print(f"Topic: {KAFKA_TOPIC}")
     print(f"MinIO: {MINIO_HOST}")
+    start_http_server(METRICS_PORT)
     
     # Initialize Kafka consumer
     consumer = KafkaConsumer(

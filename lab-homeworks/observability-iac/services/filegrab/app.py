@@ -13,6 +13,7 @@ from pathlib import Path
 from flask import Flask, request, jsonify
 import redis
 from minio import Minio
+from prometheus_client import Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 SERVICE_NAME = "filegrab"
 
@@ -26,10 +27,15 @@ MINIO_BUCKET = os.environ['MINIO_BUCKET']
 
 SUPPORTED_FORMATS = {'.pdf', '.png', '.jpg', '.jpeg'}
 
+COMPONENT_EXECUTION_SECONDS = Histogram(
+    'component_execution_seconds',
+    'Time spent processing a single component request'
+)
+
 app = Flask(__name__)
 
 # Initialize clients
-redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
+redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 minio_client = Minio(
     MINIO_HOST,
     access_key=MINIO_ACCESS_KEY,
@@ -51,6 +57,11 @@ def health():
     return jsonify({"status": "healthy", "service": "filegrab"}), 200
 
 
+@app.route('/metrics', methods=['GET'])
+def metrics():
+    return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
+
+
 @app.route('/upload', methods=['POST'])
 def upload_file():
     """
@@ -58,6 +69,7 @@ def upload_file():
     Accepts PDF or image files, stores in MinIO, and queues for processing.
     """
     start_t = time.perf_counter()
+    upload_ts = time.time()
     try:
         # Validate file presence
         if 'file' not in request.files:
@@ -88,17 +100,23 @@ def upload_file():
         
         print(f"Job {job_id}: File uploaded to MinIO: {file_path}")
         
-        # Record start timestamp for total job duration computation
-        try:
-            redis_client.set(f"job:{job_id}:start_ts", str(time.time()))
-        except Exception:
-            pass
+        # Record upload metadata for downstream timing metrics
+        redis_client.hset(
+            f"job:{job_id}",
+            mapping={
+                'upload_ts': upload_ts,
+                'file_path': file_path,
+                'file_type': file_ext,
+                'work_seconds': 0.0,
+            },
+        )
         
         # Queue job for PDF-to-Image service
         job_message = {
             'job_id': job_id,
             'file_path': file_path,
-            'file_type': file_ext
+            'file_type': file_ext,
+            'upload_ts': upload_ts,
         }
         redis_client.lpush('pdf_to_image_queue', json.dumps(job_message))
         
@@ -112,6 +130,8 @@ def upload_file():
     except Exception as e:
         print(f"Upload failed: {e}")
         return jsonify({"error": "Upload failed"}), 500
+    finally:
+        COMPONENT_EXECUTION_SECONDS.observe(time.perf_counter() - start_t)
 
 
 if __name__ == '__main__':

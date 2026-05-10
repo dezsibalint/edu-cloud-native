@@ -13,6 +13,7 @@ import numpy as np
 import redis
 import fitz
 from minio import Minio
+from prometheus_client import Histogram, start_http_server
 
 SERVICE_NAME = "pdf_to_image"
 
@@ -28,9 +29,27 @@ DPI = int(os.environ.get('DPI', '300'))
 
 PREPROCESSING_STREAM = 'preprocessing_stream'
 CONSUMER_GROUP = 'preprocessors'
+METRICS_PORT = int(os.environ.get('METRICS_PORT', '8000'))
+
+COMPONENT_EXECUTION_SECONDS = Histogram(
+    'component_execution_seconds',
+    'Time spent processing a single component request'
+)
+DOCUMENT_UPLOAD_TO_FINISH_SECONDS = Histogram(
+    'document_upload_to_finish_seconds',
+    'Time elapsed from file upload until the component finished processing'
+)
+DOCUMENT_PAGE_COUNT = Histogram(
+    'document_page_count',
+    'Number of pages processed for a document'
+)
+DOCUMENT_TOTAL_WORK_SECONDS = Histogram(
+    'document_total_work_seconds',
+    'Total processing work time accumulated for a document'
+)
 
 # Initialize clients
-redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=False)
+redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 minio_client = Minio(
     MINIO_HOST,
     access_key=MINIO_ACCESS_KEY,
@@ -63,13 +82,14 @@ def pdf_to_images(pdf_data, job_id):
     print(f"Job {job_id}: Converting {total_pages} page(s)")
     
     for page_num in range(total_pages):
+        page_start = time.perf_counter()
         pix = doc[page_num].get_pixmap(dpi=DPI)
         img_array = np.frombuffer(pix.samples, dtype=np.uint8)
         img = img_array.reshape(pix.height, pix.width, pix.n)
         
         # Convert to BGR format for OpenCV
         img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR)
-        pages.append((img, page_num + 1, total_pages))
+        pages.append((img, page_num + 1, total_pages, time.perf_counter() - page_start))
     
     doc.close()
     return pages
@@ -78,6 +98,7 @@ def pdf_to_images(pdf_data, job_id):
 def image_to_page(image_data, job_id):
     """Convert single image file to page format."""
     print(f"Job {job_id}: Processing single image")
+    page_start = time.perf_counter()
     
     img_array = np.frombuffer(image_data, np.uint8)
     img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
@@ -85,7 +106,7 @@ def image_to_page(image_data, job_id):
     if img is None:
         raise ValueError("Failed to decode image")
     
-    return [(img, 1, 1)]
+    return [(img, 1, 1, time.perf_counter() - page_start)]
 
 
 def upload_page_to_minio(image, job_id, page_number):
@@ -103,13 +124,14 @@ def upload_page_to_minio(image, job_id, page_number):
     return image_path
 
 
-def publish_to_stream(job_id, page_number, total_pages, image_path):
+def publish_to_stream(job_id, page_number, total_pages, image_path, upload_ts):
     """Publish page information to Redis Stream for preprocessing workers."""
     message = {
         'job_id': job_id,
         'page_number': str(page_number),
         'total_pages': str(total_pages),
-        'image_path': image_path
+        'image_path': image_path,
+        'upload_ts': str(upload_ts),
     }
     redis_client.xadd(PREPROCESSING_STREAM, message)
 
@@ -119,6 +141,7 @@ def process_job(job_data):
     job_id = job_data['job_id']
     file_path = job_data['file_path']
     file_type = job_data['file_type']
+    upload_ts = float(job_data.get('upload_ts') or redis_client.hget(f"job:{job_id}", 'upload_ts') or time.time())
     
     print(f"Job {job_id}: Started processing")
     start_t = time.perf_counter()
@@ -134,16 +157,25 @@ def process_job(job_data):
             pages = pdf_to_images(file_data, job_id)
         else:
             pages = image_to_page(file_data, job_id)
+
+        total_pages = len(pages)
+        DOCUMENT_PAGE_COUNT.observe(total_pages)
+        redis_client.hset(f"job:{job_id}", mapping={'total_pages': total_pages})
+        redis_client.hincrbyfloat(f"job:{job_id}", 'work_seconds', sum(page[3] for page in pages))
         
         # Upload each page and publish to stream
-        for image, page_num, total in pages:
+        for image, page_num, total, page_duration in pages:
             image_path = upload_page_to_minio(image, job_id, page_num)
-            publish_to_stream(job_id, page_num, total, image_path)
+            publish_to_stream(job_id, page_num, total, image_path, upload_ts)
             print(f"Job {job_id}: Published page {page_num}/{total}")
         
         print(f"Job {job_id}: Completed ({len(pages)} page(s))")
     except Exception as e:
         print(f"Job {job_id}: Processing failed - {e}")
+    finally:
+        duration = time.perf_counter() - start_t
+        COMPONENT_EXECUTION_SECONDS.observe(duration)
+        DOCUMENT_UPLOAD_TO_FINISH_SECONDS.observe(time.time() - upload_ts)
 
 
 def main():
@@ -152,6 +184,7 @@ def main():
     print(f"Redis: {REDIS_HOST}:{REDIS_PORT}")
     print(f"MinIO: {MINIO_HOST}")
     print(f"DPI: {DPI}")
+    start_http_server(METRICS_PORT)
     
     init_consumer_group()
     
